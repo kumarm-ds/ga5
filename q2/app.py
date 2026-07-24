@@ -1,3 +1,5 @@
+import os
+
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -59,4 +61,7 @@ def health():
 
 if __name__ == "__main__":
     # host="0.0.0.0" so it's reachable from outside your own machine
-    app.run(host="0.0.0.0", port=5000)
+    # Render (and most hosts) assign the port dynamically via the PORT env var,
+    # so we read that first and fall back to 5000 for local testing.
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
