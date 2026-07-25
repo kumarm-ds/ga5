@@ -4,6 +4,7 @@ const path = require('path');
 const dns = require('dns').promises;
 const net = require('net');
 const { URL } = require('url');
+const { Agent, fetch: undiciFetch } = require('undici');
 
 const app = express();
 app.use(express.json());
@@ -13,6 +14,10 @@ const ALLOWED_HOSTS = new Set(['example.com', 'www.iana.org']);
 
 // --- helper: is an IP address "private/internal"? ---
 function isPrivateIP(ip) {
+  // unwrap IPv4-mapped IPv6 like "::ffff:127.0.0.1" -> "127.0.0.1"
+  const mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+  if (mapped) ip = mapped[1];
+
   if (net.isIPv4(ip)) {
     const [a, b] = ip.split('.').map(Number);
     if (a === 10) return true;                       // 10.0.0.0/8
@@ -66,6 +71,24 @@ function safeReadFile(reqPath) {
   }
 }
 
+// normalize a hostname: lowercase + strip a single trailing dot ("example.com." -> "example.com")
+function normalizeHost(hostname) {
+  let h = hostname.toLowerCase();
+  if (h.endsWith('.')) h = h.slice(0, -1);
+  return h;
+}
+
+// Resolve a hostname, verify every returned address is public, and return
+// the specific safe IP to connect to. Throws/returns null on any problem.
+async function resolveAndValidate(hostname) {
+  let addrs;
+  try { addrs = await dns.lookup(hostname, { all: true }); }
+  catch { return null; }
+  if (!addrs.length) return null;
+  if (addrs.some(a => isPrivateIP(a.address))) return null;
+  return addrs[0]; // { address, family }
+}
+
 // --- fetch_url guardrail ---
 async function safeFetch(rawUrl) {
   let u;
@@ -78,25 +101,31 @@ async function safeFetch(rawUrl) {
     return { ok: false, reason: 'userinfo not allowed' }; // blocks user@host tricks
   }
 
-  const hostname = u.hostname.toLowerCase();
+  let hostname = normalizeHost(u.hostname);
   if (!ALLOWED_HOSTS.has(hostname)) {
     return { ok: false, reason: 'host not allowlisted' };
   }
 
-  // Check where the hostname ACTUALLY resolves to
-  let addrs;
-  try { addrs = await dns.lookup(hostname, { all: true }); }
-  catch { return { ok: false, reason: 'dns resolution failed' }; }
-  if (addrs.some(a => isPrivateIP(a.address))) {
-    return { ok: false, reason: 'resolves to private ip' };
-  }
+  let safeAddr = await resolveAndValidate(hostname);
+  if (!safeAddr) return { ok: false, reason: 'resolves to private ip' };
 
-  // Follow redirects manually, re-checking every hop
   let currentUrl = u.toString();
+
   for (let i = 0; i < 5; i++) {
+    // Pin the actual TCP connection to the exact IP we just validated,
+    // so there is no gap between "we checked this IP" and "we used this IP"
+    // (prevents DNS-rebinding attacks).
+    const pinnedAgent = new Agent({
+      connect: {
+        lookup: (_hostname, _opts, cb) => {
+          cb(null, [{ address: safeAddr.address, family: safeAddr.family }]);
+        }
+      }
+    });
+
     let resp;
     try {
-      resp = await fetch(currentUrl, { redirect: 'manual' });
+      resp = await undiciFetch(currentUrl, { redirect: 'manual', dispatcher: pinnedAgent });
     } catch {
       return { ok: false, reason: 'fetch failed' };
     }
@@ -116,18 +145,16 @@ async function safeFetch(rawUrl) {
         return { ok: false, reason: 'redirect userinfo' };
       }
 
-      const nextHost = next.hostname.toLowerCase();
+      const nextHost = normalizeHost(next.hostname);
       if (!ALLOWED_HOSTS.has(nextHost)) {
         return { ok: false, reason: 'redirect host not allowlisted' };
       }
 
-      let nextAddrs;
-      try { nextAddrs = await dns.lookup(nextHost, { all: true }); }
-      catch { return { ok: false, reason: 'redirect dns failed' }; }
-      if (nextAddrs.some(a => isPrivateIP(a.address))) {
-        return { ok: false, reason: 'redirect resolves private' };
-      }
+      const nextSafeAddr = await resolveAndValidate(nextHost);
+      if (!nextSafeAddr) return { ok: false, reason: 'redirect resolves private' };
 
+      hostname = nextHost;
+      safeAddr = nextSafeAddr;
       currentUrl = next.toString();
       continue;
     }
