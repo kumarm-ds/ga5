@@ -169,21 +169,28 @@ async function safeFetch(rawUrl) {
 
 app.post('/', async (req, res) => {
   const { tool, arguments: args } = req.body || {};
+  const logPrefix = `[${new Date().toISOString()}] tool=${tool} args=${JSON.stringify(args)}`;
   try {
     if (tool === 'read_file') {
       const r = safeReadFile(args && args.path);
-      return res.json(r.ok
+      const out = r.ok
         ? { action: 'allow', reason: 'inside sandbox', result: r.content }
-        : { action: 'block', reason: r.reason });
+        : { action: 'block', reason: r.reason };
+      console.log(`${logPrefix} -> ${out.action} (${out.reason})`);
+      return res.json(out);
     }
     if (tool === 'fetch_url') {
       const r = await safeFetch(args && args.url);
-      return res.json(r.ok
+      const out = r.ok
         ? { action: 'allow', reason: 'host allowlisted', result: r.content }
-        : { action: 'block', reason: r.reason });
+        : { action: 'block', reason: r.reason };
+      console.log(`${logPrefix} -> ${out.action} (${out.reason})`);
+      return res.json(out);
     }
+    console.log(`${logPrefix} -> block (unknown tool)`);
     return res.json({ action: 'block', reason: 'unknown tool' });
-  } catch {
+  } catch (err) {
+    console.log(`${logPrefix} -> block (internal error: ${err.message})`);
     return res.json({ action: 'block', reason: 'internal error' });
   }
 });
