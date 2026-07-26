@@ -1,0 +1,19 @@
+{
+  "name": "incident-agent",
+  "version": "1.0.0",
+  "description": "GA5 Observable Incident Agent (ga5-incident-agent/v2)",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test:client": "node tools/test-client.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "better-sqlite3": "^11.3.0",
+    "uuid": "^9.0.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
