@@ -78,6 +78,52 @@ function normalizeHost(hostname) {
   return h;
 }
 
+// Parameter names commonly used by real open-redirect endpoints.
+const REDIRECT_PARAM_NAMES = new Set([
+  'next', 'redirect', 'redirect_uri', 'redirect_url', 'return', 'return_to',
+  'returnto', 'continue', 'dest', 'destination', 'target', 'url', 'forward',
+  'go', 'out', 'r', 'link', 'location'
+]);
+
+// Given a fully-qualified URL, look for query parameters that smell like an
+// open-redirect target and, if the embedded value points at a private/
+// loopback/link-local/metadata address, flag it. This catches "trusted host
+// whose own redirect endpoint is being abused to reach an internal target"
+// even though the outer request's host is allowlisted.
+async function findEmbeddedRedirectRisk(u) {
+  // Only bother checking paths that look like a redirect-style endpoint,
+  // or that use a recognized redirect parameter name — a plain search page
+  // putting a URL in `q=` is not a redirect risk.
+  const pathLooksLikeRedirect = /redirect|goto|out|forward/i.test(u.pathname);
+
+  for (const [key, value] of u.searchParams) {
+    const keyLower = key.toLowerCase();
+    if (!REDIRECT_PARAM_NAMES.has(keyLower)) continue;
+    if (!pathLooksLikeRedirect && keyLower === 'url') continue; // 'url=' alone on a non-redirect path is too broad a signal
+
+    let embedded;
+    try { embedded = new URL(value); } catch { continue; } // not a URL, ignore
+    if (embedded.protocol !== 'http:' && embedded.protocol !== 'https:') continue;
+
+    const embeddedHost = normalizeHost(embedded.hostname);
+
+    // If it's a literal IP, check it directly.
+    if (net.isIP(embeddedHost)) {
+      if (isPrivateIP(embeddedHost)) return `embedded ${key} parameter targets a private address`;
+      continue;
+    }
+
+    // Otherwise resolve it and check every address.
+    let addrs;
+    try { addrs = await withTimeout(dns.lookup(embeddedHost, { all: true }), 3000, 'dns timeout'); }
+    catch { continue; }
+    if (addrs.some(a => isPrivateIP(a.address))) {
+      return `embedded ${key} parameter resolves to a private address`;
+    }
+  }
+  return null;
+}
+
 // Reuse one Agent for the whole app lifetime (creating a fresh Agent per
 // request added connection-setup overhead and, combined with a lookup
 // signature mismatch, could stall a request instead of failing fast).
@@ -136,6 +182,9 @@ async function safeFetch(rawUrl) {
     return { ok: false, reason: 'host not allowlisted' };
   }
 
+  const risk = await findEmbeddedRedirectRisk(u);
+  if (risk) return { ok: false, reason: risk };
+
   let safeAddr = await resolveAndValidate(hostname);
   if (!safeAddr) return { ok: false, reason: 'resolves to private ip' };
 
@@ -181,6 +230,9 @@ async function safeFetch(rawUrl) {
       if (!ALLOWED_HOSTS.has(nextHost)) {
         return { ok: false, reason: 'redirect host not allowlisted' };
       }
+
+      const nextRisk = await findEmbeddedRedirectRisk(next);
+      if (nextRisk) return { ok: false, reason: `redirect ${nextRisk}` };
 
       const nextSafeAddr = await resolveAndValidate(nextHost);
       if (!nextSafeAddr) return { ok: false, reason: 'redirect resolves private' };
