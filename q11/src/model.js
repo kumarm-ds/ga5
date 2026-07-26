@@ -20,6 +20,19 @@ Rules:
   and cite which evidence ID(s) (from your evidence list) justify it.
 - Choose exactly one effect tool (also from the catalog, marked as an
   effect tool) that would remediate this root cause, with exact arguments.
+  The arguments must be a genuine fix, never accidentally destructive:
+    - scale_service must INCREASE capacity (a higher replica/instance
+      count than current), never reduce it to 0 or below current, unless
+      the transcript explicitly describes taking the service offline.
+    - rollback_deployment must target the last known-good version
+      described in the transcript, not the version that introduced the
+      incident.
+    - disable_feature must name the specific feature the transcript
+      identifies as the cause, not an unrelated or guessed feature name.
+    - For any other effect tool, infer the correct direction/target
+      strictly from what the transcript's evidence lines actually say
+      (e.g. specific version numbers, region names, feature flags,
+      thresholds) — never invent a value the transcript doesn't support.
 - Respond with ONLY a JSON object, no prose, matching this exact shape:
 {
   "rootCause": "string, one of allowedRootCauses",
