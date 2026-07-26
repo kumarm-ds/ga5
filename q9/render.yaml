@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: mailroom-agent
+    env: node
+    plan: starter
+    region: oregon
+    buildCommand: npm install
+    startCommand: node src/server.js
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: MODEL_NAME
+        value: gemini-2.5-flash
+      - key: MODEL_CONCURRENCY
+        value: "8"
+      - key: DB_PATH
+        value: /var/data/mailroom.db
+    disk:
+      name: mailroom-data
+      mountPath: /var/data
+      sizeGB: 1

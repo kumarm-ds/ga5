@@ -1,0 +1,21 @@
+{
+  "name": "mailroom-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Safe AI Mailroom Agent - propose/commit action gate service",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js",
+    "keygen": "node tools/keygen.js",
+    "test:client": "node tools/test-client.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
