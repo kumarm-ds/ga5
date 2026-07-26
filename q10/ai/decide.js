@@ -15,11 +15,16 @@ Rules:
 - Base your decision ONLY on the facts stated in the package text. Watch for negation ("was NOT approved"),
   old/historical examples inside the text that are NOT about this invoice, and unrelated words that merely
   sound like actions but are irrelevant to the decision (decoys).
-- evidenceRefs must contain ONLY the exact bracketed reference tags (e.g. "[Doc 2, para 3]") for the
-  1 to 3 sentences/paragraphs that actually determine the action. Do NOT cite a cover-sheet reference,
-  archive/example references, or decoy references.
-- rationale must be 60 to 1500 characters, must name the chosen action, and must reference at least two
-  of the evidenceRefs you cited.
+- Each package's source text contains its own reference tags (e.g. bracketed IDs like "[Doc 2, para 3]",
+  "[REF-014]", "[Clause 4.2]", or whatever format that specific document uses). evidenceRefs MUST be copied
+  VERBATIM, character-for-character, from the tags that already appear in the source text for THIS package.
+  Do not invent, paraphrase, renumber, or reformat a tag. Do not use an example format from these instructions
+  if it does not literally appear in the package text — find and copy the real tag instead.
+- Cite ONLY the 1 to 3 tags for the sentence(s)/paragraph(s) that actually determine the action. Do NOT cite
+  a cover-sheet reference, an archived/historical example reference, or a decoy reference that merely mentions
+  an action-sounding word without being the controlling fact.
+- rationale must be 60 to 1500 characters, must name the chosen action, and must explain — referencing at
+  least two of the evidenceRefs you cited — specifically how those cited facts support that action.
 - facts.amountMinor is an integer in the smallest currency unit (e.g. cents/paise). facts.currency is an
   ISO-style currency code such as "INR" or "USD".
 
@@ -36,10 +41,40 @@ Return ONLY strict JSON matching this shape, nothing else, no markdown fences:
   ]
 }`;
 
+async function postChatCompletion(baseUrl, apiKey, model, userPrompt, useResponseFormat, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const body = {
+      model,
+      temperature: 0,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: userPrompt },
+      ],
+    };
+    if (useResponseFormat) body.response_format = { type: "json_object" };
+
+    const resp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    return resp;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function callModel(packages, policyRevision) {
   const baseUrl = process.env.AI_BASE_URL;
   const apiKey = process.env.AI_API_KEY;
   const model = process.env.AI_MODEL || "gpt-4o-mini";
+  const timeoutMs = Number(process.env.AI_TIMEOUT_MS || 30000);
 
   if (!baseUrl || !apiKey) {
     throw new Error("AI_BASE_URL / AI_API_KEY are not configured");
@@ -50,41 +85,55 @@ async function callModel(packages, policyRevision) {
     `Invoice packages (JSON array, one object per package):\n` +
     JSON.stringify(packages, null, 2);
 
-  const resp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userPrompt },
-      ],
-    }),
-  });
+  let resp;
+  try {
+    resp = await postChatCompletion(baseUrl, apiKey, model, userPrompt, true, timeoutMs);
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error(`AI provider timed out after ${timeoutMs}ms`);
+    }
+    throw new Error(`AI provider network error: ${err.message}`);
+  }
+
+  // Some OpenAI-compatible providers reject or mishandle response_format=json_object.
+  // If so, retry once without it and lean on the prompt + strict parsing instead.
+  if (!resp.ok && (resp.status === 400 || resp.status === 422)) {
+    const errText = await resp.text().catch(() => "");
+    console.error(`AI provider rejected response_format (status ${resp.status}): ${errText.slice(0, 500)}. Retrying without it.`);
+    try {
+      resp = await postChatCompletion(baseUrl, apiKey, model, userPrompt, false, timeoutMs);
+    } catch (err) {
+      if (err.name === "AbortError") {
+        throw new Error(`AI provider timed out after ${timeoutMs}ms (retry)`);
+      }
+      throw new Error(`AI provider network error on retry: ${err.message}`);
+    }
+  }
 
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
+    console.error(`AI provider error ${resp.status}: ${text.slice(0, 1000)}`);
     throw new Error(`AI provider error ${resp.status}: ${text.slice(0, 500)}`);
   }
 
   const data = await resp.json();
   const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error("AI provider returned no content");
+  if (!content) {
+    console.error("AI provider raw response with no content:", JSON.stringify(data).slice(0, 1000));
+    throw new Error("AI provider returned no content");
+  }
 
   let parsed;
   try {
     parsed = JSON.parse(stripFences(content));
   } catch {
+    console.error("AI provider non-JSON content:", content.slice(0, 1000));
     throw new Error("AI provider returned invalid JSON");
   }
 
   const validated = ModelBatchResponseSchema.safeParse(parsed);
   if (!validated.success) {
+    console.error("AI schema validation failure:", validated.error.message, "raw:", JSON.stringify(parsed).slice(0, 1000));
     throw new Error("AI provider JSON failed schema validation: " + validated.error.message);
   }
   return validated.data.decisions;

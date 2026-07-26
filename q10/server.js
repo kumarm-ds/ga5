@@ -21,6 +21,18 @@ import { decideBatch } from "./ai/decide.js";
 const app = express();
 app.use(express.json({ limit: "2mb", type: () => true })); // accept any Content-Type as JSON body
 
+// If the body isn't valid JSON, express.json() throws — without this handler, Express's
+// default error page (HTML) would go out instead of a proper A2A-shaped JSON error.
+app.use((err, req, res, next) => {
+  if (err && err.type === "entity.parse.failed") {
+    return res
+      .status(400)
+      .set("Content-Type", "application/a2a+json")
+      .json({ error: "INVALID_JSON_BODY" });
+  }
+  next(err);
+});
+
 const PORT = process.env.PORT || 3000;
 const BASE_URL = (process.env.BASE_URL || `http://localhost:${PORT}/a2a/`).trim();
 const BASE_PATH = "/a2a"; // everything in this file is mounted here; must match the path portion of BASE_URL
