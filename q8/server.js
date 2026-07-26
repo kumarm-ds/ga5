@@ -78,12 +78,42 @@ function normalizeHost(hostname) {
   return h;
 }
 
+// Reuse one Agent for the whole app lifetime (creating a fresh Agent per
+// request added connection-setup overhead and, combined with a lookup
+// signature mismatch, could stall a request instead of failing fast).
+function makePinnedAgent(address, family) {
+  return new Agent({
+    connect: {
+      lookup: (_hostname, options, callback) => {
+        // Match whichever callback shape the caller expects.
+        if (options && options.all) {
+          callback(null, [{ address, family }]);
+        } else {
+          callback(null, address, family);
+        }
+      },
+      timeout: 8000
+    }
+  });
+}
+
+function withTimeout(promise, ms, timeoutReason) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(timeoutReason)), ms);
+    promise.then(
+      v => { clearTimeout(t); resolve(v); },
+      e => { clearTimeout(t); reject(e); }
+    );
+  });
+}
+
 // Resolve a hostname, verify every returned address is public, and return
 // the specific safe IP to connect to. Throws/returns null on any problem.
 async function resolveAndValidate(hostname) {
   let addrs;
-  try { addrs = await dns.lookup(hostname, { all: true }); }
-  catch { return null; }
+  try {
+    addrs = await withTimeout(dns.lookup(hostname, { all: true }), 4000, 'dns timeout');
+  } catch { return null; }
   if (!addrs.length) return null;
   if (addrs.some(a => isPrivateIP(a.address))) return null;
   return addrs[0]; // { address, family }
@@ -115,19 +145,21 @@ async function safeFetch(rawUrl) {
     // Pin the actual TCP connection to the exact IP we just validated,
     // so there is no gap between "we checked this IP" and "we used this IP"
     // (prevents DNS-rebinding attacks).
-    const pinnedAgent = new Agent({
-      connect: {
-        lookup: (_hostname, _opts, cb) => {
-          cb(null, [{ address: safeAddr.address, family: safeAddr.family }]);
-        }
-      }
-    });
+    const pinnedAgent = makePinnedAgent(safeAddr.address, safeAddr.family);
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), 8000);
 
     let resp;
     try {
-      resp = await undiciFetch(currentUrl, { redirect: 'manual', dispatcher: pinnedAgent });
+      resp = await undiciFetch(currentUrl, {
+        redirect: 'manual',
+        dispatcher: pinnedAgent,
+        signal: controller.signal
+      });
     } catch {
       return { ok: false, reason: 'fetch failed' };
+    } finally {
+      clearTimeout(abortTimer);
     }
 
     if (resp.status >= 300 && resp.status < 400) {
