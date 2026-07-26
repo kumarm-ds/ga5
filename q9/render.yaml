@@ -13,7 +13,9 @@ services:
         sync: false
       - key: MODEL_NAME
         value: gemini-2.5-flash
+      - key: MODEL_BATCH_SIZE
+        value: "10"
       - key: MODEL_CONCURRENCY
-        value: "8"
+        value: "2"
       - key: DB_PATH
         value: ./data.db

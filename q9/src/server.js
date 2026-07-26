@@ -5,7 +5,7 @@ require('dotenv').config();
 const express = require('express');
 const { canonicalize, sha256hex, computeInputDigest, computeProposalDigest } = require('./canonical');
 const { validateProposeRequest, validateCommitRequest, PROFILE } = require('./validation');
-const { decideAction } = require('./model');
+const { decideActionsBatch } = require('./model');
 const { buildSafeProposal } = require('./safety');
 const { importEd25519PublicKeyFromJwk, verifyReceiptSignature } = require('./receipt-crypto');
 const store = require('./store');
@@ -28,47 +28,61 @@ function sendError(res, code, message) {
   res.status(code).set('Content-Type', 'application/json').json({ error: message });
 }
 
-const MODEL_CONCURRENCY = Number(process.env.MODEL_CONCURRENCY || 10);
-
-async function buildProposalForDossier(dossier) {
-  const contentHash = sha256hex(canonicalize(dossier));
-
-  const cached = store.getDossierCache(contentHash);
-  if (cached) {
-    return JSON.parse(cached.proposal_json ?? cached.proposalJson);
-  }
-
-  // callId is derived deterministically from dossier content, so the same
-  // dossier content always yields the same callId, even across brand new
-  // evaluations / later Checks.
-  const callId = 'call-' + contentHash.slice(0, 40);
-
-  let rawDecision = null;
-  try {
-    rawDecision = await decideAction(dossier);
-  } catch (e) {
-    rawDecision = null; // fall through to the safe fallback in buildSafeProposal
-  }
-
-  const proposal = buildSafeProposal(dossier, rawDecision, callId);
-
-  store.setDossierCache(contentHash, dossier.dossierId, JSON.stringify(proposal));
-  return proposal;
-}
+// How many uncached dossiers go into a single model call. Batching keeps
+// total request count low enough to fit free-tier rate limits and the 55s
+// per-request budget (e.g. 67 dossiers / batch size 10 = ~7 calls instead
+// of 67).
+const BATCH_SIZE = Number(process.env.MODEL_BATCH_SIZE || 10);
+// How many batches run concurrently. Keep this low - it directly multiplies
+// your requests-per-minute against the model provider.
+const BATCH_CONCURRENCY = Number(process.env.MODEL_CONCURRENCY || 2);
 
 async function buildAllProposals(dossiers) {
   const results = new Array(dossiers.length);
-  let cursor = 0;
+  const pending = []; // {index, dossier, contentHash, callId}
 
-  async function worker() {
-    for (;;) {
-      const i = cursor++;
-      if (i >= dossiers.length) return;
-      results[i] = await buildProposalForDossier(dossiers[i]);
+  for (let i = 0; i < dossiers.length; i++) {
+    const dossier = dossiers[i];
+    const contentHash = sha256hex(canonicalize(dossier));
+    const callId = 'call-' + contentHash.slice(0, 40);
+
+    const cached = store.getDossierCache(contentHash);
+    if (cached) {
+      results[i] = JSON.parse(cached.proposal_json ?? cached.proposalJson);
+    } else {
+      pending.push({ index: i, dossier, contentHash, callId });
     }
   }
 
-  const workerCount = Math.max(1, Math.min(MODEL_CONCURRENCY, dossiers.length));
+  const batches = [];
+  for (let i = 0; i < pending.length; i += BATCH_SIZE) {
+    batches.push(pending.slice(i, i + BATCH_SIZE));
+  }
+
+  let cursor = 0;
+  async function worker() {
+    for (;;) {
+      const b = cursor++;
+      if (b >= batches.length) return;
+      const batch = batches[b];
+
+      let decisionMap = new Map();
+      try {
+        decisionMap = await decideActionsBatch(batch.map((item) => item.dossier));
+      } catch (e) {
+        decisionMap = new Map(); // whole batch falls back to safe defaults below
+      }
+
+      for (const item of batch) {
+        const rawDecision = decisionMap.get(item.dossier.dossierId) || null;
+        const proposal = buildSafeProposal(item.dossier, rawDecision, item.callId);
+        store.setDossierCache(item.contentHash, item.dossier.dossierId, JSON.stringify(proposal));
+        results[item.index] = proposal;
+      }
+    }
+  }
+
+  const workerCount = Math.max(1, Math.min(BATCH_CONCURRENCY, batches.length));
   await Promise.all(Array.from({ length: workerCount }, worker));
   return results;
 }

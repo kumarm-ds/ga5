@@ -122,17 +122,32 @@ fragment, as required.
 
 ## 5. Tuning before the real Check
 
-- **Timing:** the first `propose` call for a fresh Check has to run the AI
-  step on all ~67 dossiers (64 core + 3 audit) within 55 seconds. Adjust
-  `MODEL_CONCURRENCY` up or down based on your model provider's rate
-  limits and observed latency. Gemini's free tier caps requests-per-minute
-  (roughly 10-15 RPM depending on model as of mid-2026) - if you hit 429s,
-  lower `MODEL_CONCURRENCY` and/or switch `MODEL_NAME` to
-  `gemini-2.5-flash-lite`, which has a higher free-tier RPM/RPD ceiling.
-- **Safety prompt:** `src/model.js`'s `SYSTEM_PROMPT` is a starting point.
-  Once you see real dossier shapes (their `provenance` values especially),
-  tighten the guidance — e.g. what counts as a "trusted, scoped approval"
-  for `send_approved_notice`.
+- **Timing & rate limits:** dossiers are sent to the model in BATCHES
+  (`MODEL_BATCH_SIZE`, default 10), not one call per dossier — this is
+  essential, not optional. Gemini's free tier caps requests-per-minute
+  (roughly 10-15 depending on model as of mid-2026); one call per dossier
+  for ~67 dossiers cannot possibly complete inside the 55-second budget or
+  the rate limit, and every failed call falls back to a generic
+  `request_confirmation` proposal — which is exactly what "actions right
+  but arguments/evidence always wrong" in grader feedback indicates. If you
+  still see 429s in your logs, lower `MODEL_CONCURRENCY` (how many batches
+  run in parallel) and/or `MODEL_BATCH_SIZE`, or switch `MODEL_NAME` to
+  `gemini-2.5-flash-lite` for a higher free-tier ceiling.
+- **Argument/evidence accuracy:** `src/model.js`'s `SYSTEM_PROMPT` spells
+  out the exact `target`/`payload` shape and value rules per action, and
+  insists every value be copied verbatim from the dossier text rather than
+  invented. If grading feedback still shows argument or evidence misses,
+  tighten this prompt further once you can see real dossier shapes —
+  especially what "authority" looks like for `send_approved_notice` and
+  what counts as the minimal evidence set per action.
+- **Downstream commit failures:** if `propose` times out or errors (e.g.
+  from rate limiting), no evaluation gets persisted, which then makes any
+  later conflict-detection or invalid-receipt test against that
+  evaluationId behave like a brand-new evaluation instead of correctly
+  rejecting. Fixing propose reliability (the batching above) generally
+  fixes these downstream symptoms too — the commit/receipt logic itself
+  (`handleCommit` in `src/server.js`) was verified correct in isolation via
+  `tools/test-client.js`.
 - **Fallback behavior:** `src/safety.js` currently falls back to
   `request_confirmation` whenever the model's output is missing or fails
   schema validation. That's a safe default (never an unauthorized outbound
