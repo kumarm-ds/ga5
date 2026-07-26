@@ -2,7 +2,7 @@ services:
   - type: web
     name: mailroom-agent
     env: node
-    plan: starter
+    plan: free
     region: oregon
     rootDir: q9
     buildCommand: npm install
@@ -16,8 +16,4 @@ services:
       - key: MODEL_CONCURRENCY
         value: "8"
       - key: DB_PATH
-        value: /var/data/mailroom.db
-    disk:
-      name: mailroom-data
-      mountPath: /var/data
-      sizeGB: 1
+        value: ./data.db
