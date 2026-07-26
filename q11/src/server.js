@@ -30,7 +30,7 @@ app.post("/v2/incidents", async (req, res) => {
     const err = validateIncidentRequest(body);
     if (err) return sendJson(res, 422, { error: err });
 
-    const existing = getRun(body.runId);
+    const existing = await getRun(body.runId);
     if (existing) {
       if (deepEqual(existing.requestSnapshot, body)) {
         return sendJson(res, 200, existing.lastResponse); // pure replay
@@ -40,7 +40,7 @@ app.post("/v2/incidents", async (req, res) => {
 
     const { run, response } = await createRun(body, req.header("traceparent"));
     run.requestSnapshot = body;
-    saveRun(run.runId, run);
+    await saveRun(run.runId, run);
     return sendJson(res, 200, response);
   } catch (e) {
     console.error(e);
@@ -55,10 +55,10 @@ app.post("/v2/incidents/:runId/receipts", async (req, res) => {
     const err = validateReceiptsRequest(body);
     if (err) return sendJson(res, 422, { error: err });
 
-    const run = getRun(runId);
+    const run = await getRun(runId);
     if (!run) return sendJson(res, 404, { error: "unknown runId" });
 
-    const existingReceipt = getReceipt(runId, body.receiptId);
+    const existingReceipt = await getReceipt(runId, body.receiptId);
     if (existingReceipt) {
       if (deepEqual(existingReceipt.body, body)) {
         return sendJson(res, 200, existingReceipt.response); // pure replay
@@ -70,8 +70,8 @@ app.post("/v2/incidents/:runId/receipts", async (req, res) => {
     response = withTrace(run, response);
 
     run.lastResponse = response;
-    saveRun(run.runId, run);
-    saveReceipt(run.runId, body.receiptId, body, response);
+    await saveRun(run.runId, run);
+    await saveReceipt(run.runId, body.receiptId, body, response);
 
     return sendJson(res, 200, response);
   } catch (e) {
@@ -80,10 +80,15 @@ app.post("/v2/incidents/:runId/receipts", async (req, res) => {
   }
 });
 
-app.get("/v2/incidents/:runId", (req, res) => {
-  const run = getRun(req.params.runId);
-  if (!run) return sendJson(res, 404, { error: "unknown runId" });
-  return sendJson(res, 200, run.lastResponse);
+app.get("/v2/incidents/:runId", async (req, res) => {
+  try {
+    const run = await getRun(req.params.runId);
+    if (!run) return sendJson(res, 404, { error: "unknown runId" });
+    return sendJson(res, 200, run.lastResponse);
+  } catch (e) {
+    console.error(e);
+    return sendJson(res, 500, { error: "storage error" });
+  }
 });
 
 app.get("/health", (req, res) => res.status(200).send("ok"));

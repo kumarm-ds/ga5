@@ -10,7 +10,7 @@ a pure OTLP trace builder that reflects only stored state.
 ```
 src/
   ids.js          opaque IDs, W3C traceparent parse/generate, SHA-256 digest
-  db.js           SQLite persistence (runs + receipts, replay/conflict lookup)
+  db.js           persistence via Upstash Redis REST API (runs + receipts, replay/conflict lookup)
   model.js        the one AI call per new run + strict re-validation of its output
   statemachine.js create + receipt processing (retry/timeout/approval/finalize)
   trace.js        pure OTLP builder — reads stored state only, never re-plans
@@ -21,13 +21,41 @@ tools/
 render.yaml        Render deployment blueprint
 ```
 
-## 1. Run it locally
+## 1. Get a free AI API key
+
+Any OpenAI-compatible provider works. Groq's free tier is fastest to set up:
+
+1. Go to **https://console.groq.com** → sign up.
+2. **API Keys** → **Create API Key** → copy it.
+3. Values to set:
+   - `AI_BASE_URL=https://api.groq.com/openai/v1`
+   - `AI_API_KEY=<your key>`
+   - `AI_MODEL=llama-3.3-70b-versatile`
+
+Gemini also works via its OpenAI-compatible endpoint:
+- `AI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai`
+- `AI_API_KEY=<Gemini key from https://aistudio.google.com/apikey>`
+- `AI_MODEL=gemini-2.5-flash-lite`
+
+## 2. Get a free Upstash Redis database (storage)
+
+Render's **Free** instance type doesn't offer persistent Disks, and its
+local filesystem is wiped whenever the instance spins down from idling —
+so this project stores state in Upstash Redis over HTTPS instead, which
+works fine on Render's free tier.
+
+1. Go to **https://console.upstash.com** → sign up (GitHub/Google login works).
+2. **Create Database** → any name, region close to your Render region → Create.
+3. On the database's detail page, find the **REST API** section and copy:
+   - `UPSTASH_REDIS_REST_URL`
+   - `UPSTASH_REDIS_REST_TOKEN`
+
+## 3. Run it locally
 
 ```bash
 npm install
 cp .env.example .env
-# edit .env: set AI_API_KEY (Groq/Gemini/OpenRouter/etc — any OpenAI-compatible
-# chat completions endpoint works; model choice earns no marks)
+# edit .env: fill in AI_API_KEY and the two UPSTASH_REDIS_REST_* values
 npm start
 ```
 
@@ -43,23 +71,7 @@ scenario you can adapt from `tools/test-client.js` (build outcomes with
 `status: 503`, then `status: 0, resultClass/errorType: "timeout"`, then an
 approval decision, mirroring the grader's receipt shapes).
 
-## 2. Get a free AI API key
-
-Any OpenAI-compatible provider works. Groq's free tier is fastest to set up:
-
-1. Go to **https://console.groq.com** → sign up.
-2. **API Keys** → **Create API Key** → copy it.
-3. Set in `.env` (local) / Render environment (deployed):
-   - `AI_BASE_URL=https://api.groq.com/openai/v1`
-   - `AI_API_KEY=<your key>`
-   - `AI_MODEL=llama-3.3-70b-versatile`
-
-Gemini also works via its OpenAI-compatible endpoint:
-- `AI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai`
-- `AI_API_KEY=<Gemini key from https://aistudio.google.com/apikey>`
-- `AI_MODEL=gemini-2.5-flash-lite`
-
-## 3. Push to GitHub
+## 4. Push to GitHub
 
 ```bash
 cd incident-agent
@@ -71,21 +83,30 @@ git remote add origin https://github.com/<your-username>/<your-repo>.git
 git push -u origin main
 ```
 
-## 4. Deploy on Render
+(If this lives as a subfolder in an existing monorepo like `ga5/q11/`, just
+`git add q11 && git commit -m "..." && git push` from the repo root instead.)
 
-**Option A — Blueprint (uses `render.yaml`):**
-1. https://dashboard.render.com → **New** → **Blueprint** → connect this repo.
-2. Render reads `render.yaml` automatically. When prompted, paste your
-   `AI_API_KEY` (marked `sync: false`, so it's not committed to git).
-3. Deploy. You'll get a URL like `https://incident-agent-xxxx.onrender.com`.
+## 5. Deploy on Render
 
-**Option B — Manual web service:**
-1. **New** → **Web Service** → connect this repo.
-2. Environment: **Node**. Build: `npm install`. Start: `npm start`.
-3. Add a **Disk** (1 GB, mount path `/var/data`) so SQLite state survives
-   restarts, and set `DB_PATH=/var/data/incident-agent.db`.
-4. Add env vars `AI_BASE_URL`, `AI_API_KEY`, `AI_MODEL`.
-5. Create the service and wait for the build to go green.
+Use the manual **Web Service** route — most foolproof for a monorepo
+subfolder, and matches the `plan: free` in `render.yaml` (no disk needed):
+
+1. Render dashboard → **New +** → **Web Service** → connect your repo.
+2. **Root Directory**: the subfolder this project lives in (e.g. `q11`) —
+   leave blank if it's the whole repo.
+3. **Runtime**: `Node`. **Build Command**: `npm install`. **Start Command**: `npm start`.
+4. **Instance Type**: Free.
+5. Under **Environment Variables**, add:
+
+   | Key | Value |
+   |---|---|
+   | `AI_BASE_URL` | `https://api.groq.com/openai/v1` |
+   | `AI_API_KEY` | *(your key)* |
+   | `AI_MODEL` | `llama-3.3-70b-versatile` |
+   | `UPSTASH_REDIS_REST_URL` | *(from Upstash)* |
+   | `UPSTASH_REDIS_REST_TOKEN` | *(from Upstash)* |
+
+6. Click **Create Web Service** and wait for the build to go green.
 
 ## 5. Submit
 
