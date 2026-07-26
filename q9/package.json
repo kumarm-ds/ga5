@@ -4,7 +4,7 @@
   "private": true,
   "description": "Safe AI Mailroom Agent - propose/commit action gate service",
   "engines": {
-    "node": ">=18"
+    "node": "20.x"
   },
   "main": "src/server.js",
   "scripts": {
